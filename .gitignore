@@ -1,0 +1,47 @@
+# Downloaded source archives
+*.tar
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tgz
+*.zip
+
+# Unpacked third-party source/build trees
+linux-*/
+busybox-*/
+
+# Kernel and module build output
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+*.o
+*.cmd
+*.symvers
+*.order
+Module.symvers
+modules.order
+System.map
+vmlinux*
+.tmp_*
+.version
+
+# Generated root filesystem and VM artifacts
+initramfs*.cpio*
+fs/bin/
+fs/sbin/
+fs/usr/
+fs/lib/
+fs/lib64/
+fs/dev/
+fs/proc/
+fs/sys/
+fs/tmp/
+fs/linuxrc
+fs/*.ko
+
+# Local/editor noise
+.DS_Store
+*.swp
+*.swo
+*~
