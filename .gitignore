@@ -1,14 +1,7 @@
-# Downloaded source archives
-*.tar
-*.tar.gz
-*.tar.bz2
-*.tar.xz
-*.tgz
-*.zip
-
-# Unpacked third-party source/build trees
-linux-*/
-busybox-*/
+# Cached source archives, build trees, and retired Windows files
+/data/archive/
+/data/build/
+/data/legacy/
 
 # Kernel and module build output
 *.ko
@@ -28,19 +21,23 @@ vmlinux*
 
 # Generated root filesystem and VM artifacts
 initramfs*.cpio*
-fs/bin/
-fs/sbin/
-fs/usr/
-fs/lib/
-fs/lib64/
-fs/dev/
-fs/proc/
-fs/sys/
-fs/tmp/
-fs/linuxrc
-fs/*.ko
+/bzImage
+/data/rootfs/bin/
+/data/rootfs/sbin/
+/data/rootfs/usr/
+/data/rootfs/lib/
+/data/rootfs/lib64/
+/data/rootfs/dev/
+/data/rootfs/proc/
+/data/rootfs/sys/
+/data/rootfs/tmp/
+/data/rootfs/linuxrc
+/data/rootfs/*.ko
+/data/rootfs/usr/bin/sudo
+share/
 
-# Local/editor noise
+# Runtime logs and local/editor noise
+/log/
 .DS_Store
 *.swp
 *.swo

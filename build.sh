@@ -1,12 +1,65 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
-export KERNEL_VERSION=5.4
+export KERNEL_VERSION=6.8.9
 export BUSYBOX_VERSION=1.32.0
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DATA_DIR="$SCRIPT_DIR/data"
+ROOTFS_DIR="$DATA_DIR/rootfs"
+MODULE_DIR="$DATA_DIR/src"
+TOOLS_DIR="$DATA_DIR/tools"
+LOG_DIR="$SCRIPT_DIR/log"
+RUNTIME_KERNEL_IMAGE="$SCRIPT_DIR/bzImage"
+RUNTIME_INITRAMFS="$SCRIPT_DIR/initramfs.cpio.gz"
 cd "$SCRIPT_DIR"
 
+if [ "$(uname -s)" != "Linux" ]; then
+  echo "[-] This project builds on Linux only." >&2
+  exit 1
+fi
+
+mkdir -p "$LOG_DIR"
+BUILD_LOG="$LOG_DIR/build-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
+exec 3>&1 4>&2
+exec > >(tee -a "$BUILD_LOG")
+log_stdout_pid=$!
+exec 2> >(tee -a "$BUILD_LOG" >&2)
+log_stderr_pid=$!
+
+finish_logging() {
+  local status="$1"
+  exec 1>&3 2>&4
+  wait "$log_stdout_pid" "$log_stderr_pid" || true
+  exec 3>&- 4>&-
+  exit "$status"
+}
+
+finish_logging_on_exit() {
+  local status=$?
+  trap - EXIT
+  finish_logging "$status"
+}
+trap finish_logging_on_exit EXIT
+
+echo "[+] Build log: $BUILD_LOG"
+
 JOBS="${JOBS:-2}"
+if [ -z "${BUILD_DIR:-}" ]; then
+  # A project below /mnt/<drive> is normally on NTFS/FAT, where the kernel
+  # tree cannot be built safely because source names may differ only by case.
+  # Keep its real source/build tree on the Linux filesystem instead.
+  case "$SCRIPT_DIR" in
+    /mnt/[a-z]/*)
+      project_id="$(printf '%s' "$SCRIPT_DIR" | sha256sum | cut -c1-16)"
+      BUILD_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/pwnkernel/$project_id"
+      ;;
+    *) BUILD_DIR="$DATA_DIR/build" ;;
+  esac
+fi
+mkdir -p "$BUILD_DIR"
+BUILD_DIR="$(cd "$BUILD_DIR" && pwd)"
+echo "[+] Build directory: $BUILD_DIR"
+BUILD_DIR="$BUILD_DIR" bash "$SCRIPT_DIR/clean.sh" before-build
 
 #
 # dependencies
@@ -32,69 +85,55 @@ else
   echo "[+] Skipping dependency installation (SKIP_DEPS=1)."
 fi
 
+cd "$BUILD_DIR"
+
 #
 # linux kernel
 #
 
-echo "[+] Downloading kernel..."
-if [ ! -f linux-$KERNEL_VERSION.tar.gz ]; then
-  wget -c https://mirrors.edge.kernel.org/pub/linux/kernel/v5.x/linux-$KERNEL_VERSION.tar.gz
-else
+echo "[+] Preparing kernel..."
+if [ ! -d "linux-$KERNEL_VERSION" ] && [ ! -f "linux-$KERNEL_VERSION.tar.gz" ]; then
+  wget -c -O linux-$KERNEL_VERSION.tar.gz.part https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$KERNEL_VERSION.tar.gz
+  mv linux-$KERNEL_VERSION.tar.gz.part linux-$KERNEL_VERSION.tar.gz
+elif [ -f "linux-$KERNEL_VERSION.tar.gz" ]; then
   echo "[+] Using cached linux-$KERNEL_VERSION.tar.gz."
+else
+  echo "[+] Using existing kernel source tree."
 fi
 [ -e linux-$KERNEL_VERSION ] || tar xzf linux-$KERNEL_VERSION.tar.gz
 
+kernel_security_config_ok() {
+  grep -qx 'CONFIG_INIT_STACK_NONE=y' "linux-$KERNEL_VERSION/.config" 2>/dev/null && \
+    grep -qx '# CONFIG_VMAP_STACK is not set' "linux-$KERNEL_VERSION/.config" 2>/dev/null
+}
+
 if [ "${FORCE_KERNEL_REBUILD:-0}" != "1" ] && \
   [ -f linux-$KERNEL_VERSION/arch/x86/boot/bzImage ] && \
-  [ -f linux-$KERNEL_VERSION/vmlinux ]; then
-  echo "[+] Using existing kernel image linux-$KERNEL_VERSION/arch/x86/boot/bzImage."
+  [ -f linux-$KERNEL_VERSION/vmlinux ] && \
+  [ -f linux-$KERNEL_VERSION/Module.symvers ] && \
+  kernel_security_config_ok; then
+	echo "[+] Using existing kernel image linux-$KERNEL_VERSION/arch/x86/boot/bzImage."
 else
-  echo "[+] Building kernel..."
+	echo "[+] Building kernel (or refreshing its security configuration)..."
   make -C linux-$KERNEL_VERSION defconfig
-  echo "CONFIG_NET_9P=y" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_NET_9P_DEBUG=n" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_9P_FS=y" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_9P_FS_POSIX_ACL=y" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_9P_FS_SECURITY=y" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_NET_9P_VIRTIO=y" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_VIRTIO_PCI=y" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_VIRTIO_BLK=y" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_VIRTIO_BLK_SCSI=y" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_VIRTIO_NET=y" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_VIRTIO_CONSOLE=y" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_HW_RANDOM_VIRTIO=y" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_DRM_VIRTIO_GPU=y" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_VIRTIO_PCI_LEGACY=y" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_VIRTIO_BALLOON=y" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_VIRTIO_INPUT=y" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_CRYPTO_DEV_VIRTIO=y" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_BALLOON_COMPACTION=y" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_PCI=y" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_PCI_HOST_GENERIC=y" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_GDB_SCRIPTS=y" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_DEBUG_INFO=y" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_DEBUG_INFO_REDUCED=n" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_DEBUG_INFO_SPLIT=n" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_DEBUG_FS=y" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_DEBUG_INFO_DWARF4=y" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_DEBUG_INFO_BTF=n" >> linux-$KERNEL_VERSION/.config
-  echo "CONFIG_FRAME_POINTER=y" >> linux-$KERNEL_VERSION/.config
+  linux-$KERNEL_VERSION/scripts/config --file linux-$KERNEL_VERSION/.config \
+    -e MODULES -e DEVTMPFS -e BLK_DEV_INITRD \
+    -e NET_9P -e NET_9P_VIRTIO -e 9P_FS -e 9P_FS_POSIX_ACL -e 9P_FS_SECURITY \
+    -e VIRTIO_PCI -e VIRTIO_BLK -e VIRTIO_NET -e VIRTIO_CONSOLE \
+    -e HW_RANDOM_VIRTIO -e DRM_VIRTIO_GPU -e VIRTIO_PCI_LEGACY \
+    -e VIRTIO_BALLOON -e VIRTIO_INPUT -e CRYPTO_DEV_VIRTIO \
+    -e GDB_SCRIPTS -e DEBUG_FS -d DEBUG_INFO_NONE -e DEBUG_INFO_DWARF4 \
+    -d DEBUG_INFO_BTF -d WERROR \
+    -e INIT_STACK_NONE -d INIT_STACK_ALL_PATTERN -d INIT_STACK_ALL_ZERO \
+    -d VMAP_STACK
   make -C linux-$KERNEL_VERSION olddefconfig
-
-  sed -i 'N;s/WARN("missing symbol table");\n\t\treturn -1;/\n\t\treturn 0;\n\t\t\/\/ A missing symbol table is actually possible if its an empty .o file.  This can happen for thunk_64.o./g' linux-$KERNEL_VERSION/tools/objtool/elf.c
-
-  sed -i 's/unsigned long __force_order/\/\/ unsigned long __force_order/g' linux-$KERNEL_VERSION/arch/x86/boot/compressed/pgtable_64.c
-
-  # Fix Linux 5.4 builds with newer GCC versions.
-  sed -i 's/REALMODE_CFLAGS\t:= $(M16_CFLAGS)/REALMODE_CFLAGS\t:= -std=gnu89 $(M16_CFLAGS)/' linux-$KERNEL_VERSION/arch/x86/Makefile
-  sed -i 's/KBUILD_CFLAGS[[:space:]]*:= $(cflags-y)/KBUILD_CFLAGS := -std=gnu89 $(cflags-y)/' linux-$KERNEL_VERSION/drivers/firmware/efi/libstub/Makefile
-  sed -i 's/KBUILD_CFLAGS := -m$(BITS) -O2/KBUILD_CFLAGS := -std=gnu89 -m$(BITS) -O2/' linux-$KERNEL_VERSION/arch/x86/boot/compressed/Makefile
-  sed -i 's/-Werror//g' linux-$KERNEL_VERSION/tools/objtool/Makefile
-  sed -i 's/-Werror//g' linux-$KERNEL_VERSION/tools/lib/subcmd/Makefile
-  sed -i 's/-Werror//g' linux-$KERNEL_VERSION/tools/build/Makefile.build
-
-  make -C linux-$KERNEL_VERSION -j"$JOBS" bzImage \
-    HOSTCFLAGS="-Wno-error=redundant-decls -Wno-error=use-after-free"
+  # These boot stages reset KBUILD_CFLAGS and otherwise inherit GCC 15's
+  # C23 default, which conflicts with the 6.8 kernel's bool/false definitions.
+  sed -i 's/^KBUILD_CFLAGS[[:space:]]*:= $(subst /KBUILD_CFLAGS := -std=gnu11 $(subst /' \
+    linux-$KERNEL_VERSION/drivers/firmware/efi/libstub/Makefile
+  sed -i 's/^KBUILD_CFLAGS := -m$(BITS)/KBUILD_CFLAGS := -std=gnu11 -m$(BITS)/' \
+    linux-$KERNEL_VERSION/arch/x86/boot/compressed/Makefile
+  make -C linux-$KERNEL_VERSION -j"$JOBS" bzImage modules
 fi
 #
 # Busybox
@@ -121,17 +160,27 @@ make -C busybox-$BUSYBOX_VERSION install
 #
 
 echo "[+] Building filesystem..."
-cd fs
-mkdir -p bin sbin etc proc sys usr/bin usr/sbin root home/ctf
-cd ..
-cp -a busybox-$BUSYBOX_VERSION/_install/* fs
+mkdir -p "$ROOTFS_DIR"/{bin,sbin,etc,proc,sys,usr/bin,usr/sbin,root,home/ctf}
+cp -a busybox-$BUSYBOX_VERSION/_install/. "$ROOTFS_DIR/"
+gcc -static -Os -Wall -Wextra -o "$ROOTFS_DIR/usr/bin/sudo" "$MODULE_DIR/sudo.c"
+install -m 0755 "$TOOLS_DIR/vm-insmod" "$ROOTFS_DIR/usr/bin/vm-insmod"
+chmod +x "$ROOTFS_DIR/init"
 
 #
 # modules
 #
 
 echo "[+] Building modules..."
-cd src
-make
-cd ..
-cp src/*.ko fs/
+make -C "$MODULE_DIR" KERNEL_DIR="$BUILD_DIR/linux-$KERNEL_VERSION"
+cp "$MODULE_DIR"/*.ko "$ROOTFS_DIR/"
+
+echo "[+] Packaging runtime artifacts..."
+install -m 0644 "linux-$KERNEL_VERSION/arch/x86/boot/bzImage" "$RUNTIME_KERNEL_IMAGE"
+initramfs_part="$RUNTIME_INITRAMFS.part"
+rm -f -- "$initramfs_part"
+pushd "$ROOTFS_DIR" >/dev/null
+find . -print0 | cpio --null -o --format=newc --owner=0:0 --quiet | gzip -9 > "$initramfs_part"
+popd >/dev/null
+mv -- "$initramfs_part" "$RUNTIME_INITRAMFS"
+BUILD_DIR="$BUILD_DIR" bash "$SCRIPT_DIR/clean.sh" after-build
+echo "[+] Build complete. Run ./launch.sh from $SCRIPT_DIR."

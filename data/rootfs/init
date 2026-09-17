@@ -1,0 +1,126 @@
+#!/bin/sh
+set -eu
+
+mkdir -p /dev /proc /sys /tmp /home/ctf /home/d4vicl /mnt/wsl
+mount -t devtmpfs devtmpfs /dev
+mount -t proc none /proc
+mount -t sysfs none /sys
+chmod 1777 /tmp
+chown 1000:1000 /home/ctf
+mount -t 9p -o trans=virtio,version=9p2000.L,msize=1048576,nosuid,nodev hostshare /home/ctf
+mkdir -p /home/ctf/host
+mount -t 9p -o trans=virtio,version=9p2000.L,msize=1048576,nosuid,nodev,cache=none hosthome /home/ctf/host
+mount -t 9p -o trans=virtio,version=9p2000.L,msize=1048576,nosuid,nodev,cache=none wslshare /mnt/wsl
+mount -t 9p -o trans=virtio,version=9p2000.L,msize=1048576,nosuid,nodev,cache=none d4viclshare /home/d4vicl
+# mapped-xattr keeps guest ownership separate from the WSL account's UID.
+chown 1000:1000 /mnt/wsl
+chmod 0755 /mnt/wsl
+chown 1000:1000 /home/ctf/host
+chmod 0755 /home/ctf/host
+chown 1000:1000 /home/d4vicl
+chmod 0755 /home/d4vicl
+
+kernel_arg() {
+    key="$1"
+    for arg in $(cat /proc/cmdline); do
+        case "$arg" in
+            "$key"=*) printf '%s\n' "${arg#*=}"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
+custom_modules="$(kernel_arg ctf.modules || true)"
+custom_device_modes="$(kernel_arg ctf.chmod || true)"
+custom_test="$(kernel_arg ctf.test || true)"
+custom_test_delay="$(kernel_arg ctf.test_delay || true)"
+
+chown 0:0 /flag
+chmod 0600 /flag
+chmod 0644 /*.ko
+# Every module compiled under src/ is copied to / by build.sh and loaded here.
+for module_path in /*.ko; do
+    [ -f "$module_path" ] || continue
+    insmod "$module_path"
+done
+
+# Additional .ko files can be supplied by ./launch.sh --module from a mounted
+# host share. Paths are deliberately restricted to the shares created above.
+if [ -n "$custom_modules" ]; then
+    old_ifs="$IFS"
+    IFS=,
+    for module_path in $custom_modules; do
+        case "$module_path" in
+            /home/d4vicl/*|/mnt/wsl/*|/home/ctf/.launch-artifacts/*) ;;
+            *) echo "[-] Refusing custom module outside shared directories: $module_path" >&2; exit 1 ;;
+        esac
+        [ -f "$module_path" ] || { echo "[-] Custom module not found: $module_path" >&2; exit 1; }
+        echo "[+] Loading custom module: $module_path"
+        insmod "$module_path"
+    done
+    IFS="$old_ifs"
+fi
+
+# Some teaching modules create a root-only endpoint by default.  The launcher
+# can declare the endpoint contract explicitly, and this runs before the test
+# is dropped to ctf.  Limit the target to virtual kernel endpoints.
+if [ -n "$custom_device_modes" ]; then
+    old_ifs="$IFS"
+    IFS=,
+    for mode_spec in $custom_device_modes; do
+        device_path="${mode_spec%:*}"
+        mode="${mode_spec##*:}"
+        case "$device_path" in
+            /dev/*|/proc/*) ;;
+            *) echo "[-] Refusing mode change outside /dev or /proc: $device_path" >&2; exit 1 ;;
+        esac
+        case "$mode" in
+            [0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]) ;;
+            *) echo "[-] Invalid endpoint mode: $mode" >&2; exit 1 ;;
+        esac
+        [ -e "$device_path" ] || { echo "[-] Endpoint not found after module load: $device_path" >&2; exit 1; }
+        echo "[+] Setting endpoint mode: $device_path -> $mode"
+        chmod "$mode" "$device_path"
+    done
+    IFS="$old_ifs"
+fi
+
+major=$(awk '$2 == "pwn-college-char" { print $1 }' /proc/devices)
+test -n "$major"
+mknod /dev/pwn-college-char c "$major" 0
+chmod 0666 /dev/pwn-college-char
+sysctl -w kernel.perf_event_paranoid=1
+
+echo
+echo "Welcome to pwn.college - Linux $(uname -r)"
+echo 'Shared WSL directory: /mnt/wsl'
+echo 'Host home shortcut: ~/host'
+echo 'Persistent host directory: /home/d4vicl'
+echo 'Module interfaces: /dev/pwn-college-char, /proc/pwn-college-*'
+echo
+
+# Run an optional shared test as ctf, then leave an interactive shell for
+# inspection regardless of the test's exit status.
+if [ -n "$custom_test" ]; then
+    case "$custom_test" in
+        /home/d4vicl/*|/mnt/wsl/*|/home/ctf/.launch-artifacts/*) ;;
+        *) echo "[-] Refusing test outside shared directories: $custom_test" >&2; exit 1 ;;
+    esac
+    [ -x "$custom_test" ] || { echo "[-] Test is not executable: $custom_test" >&2; exit 1; }
+    case "$custom_test_delay" in
+        '') custom_test_delay=0 ;;
+        *[!0-9]*) echo "[-] Invalid test delay: $custom_test_delay" >&2; exit 1 ;;
+    esac
+    echo "[+] Running test as ctf: $custom_test (delay: ${custom_test_delay}s)"
+    set +e
+    /bin/su -l ctf -c "sleep $custom_test_delay; exec $custom_test"
+    test_status=$?
+    set -e
+    echo "[+] Test exit status: $test_status"
+    echo
+fi
+
+case " $(cat /proc/cmdline) " in
+    *' ctf.shell=root '*) exec /usr/bin/setsid /bin/cttyhack /bin/sh ;;
+    *) exec /usr/bin/setsid /bin/cttyhack /bin/su -l ctf ;;
+esac

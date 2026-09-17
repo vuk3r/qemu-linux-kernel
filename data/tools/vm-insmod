@@ -1,0 +1,32 @@
+#!/bin/sh
+# Guest helper: load one module and make its endpoint usable by ctf.
+set -eu
+
+usage() {
+    echo "Usage: vm-insmod MODULE.ko [ENDPOINT] [MODE]" >&2
+    echo "Default ENDPOINT: /dev/<module-name>; default MODE: 666" >&2
+}
+
+[ "$#" -ge 1 ] && [ "$#" -le 3 ] || { usage; exit 2; }
+
+module="$1"
+module_name="$(basename "$module" .ko)"
+endpoint="${2:-/dev/$module_name}"
+mode="${3:-666}"
+
+case "$module" in
+    *.ko) ;;
+    *) echo "vm-insmod: module must end in .ko: $module" >&2; exit 2 ;;
+esac
+[ -f "$module" ] || { echo "vm-insmod: module not found: $module" >&2; exit 1; }
+case "$endpoint" in
+    /dev/*|/proc/*) ;;
+    *) echo "vm-insmod: endpoint must be below /dev or /proc: $endpoint" >&2; exit 2 ;;
+esac
+case "$mode" in
+    [0-7][0-7][0-7]|[0-7][0-7][0-7][0-7]) ;;
+    *) echo "vm-insmod: mode must be three or four octal digits: $mode" >&2; exit 2 ;;
+esac
+
+sudo insmod "$module" && sudo chmod "$mode" "$endpoint"
+echo "[+] Loaded $module; $endpoint is $mode and usable by ctf."
