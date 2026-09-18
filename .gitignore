@@ -22,6 +22,7 @@ vmlinux*
 # Generated root filesystem and VM artifacts
 initramfs*.cpio*
 /bzImage
+/.trash_gadgets.sha256
 /data/rootfs/bin/
 /data/rootfs/sbin/
 /data/rootfs/usr/

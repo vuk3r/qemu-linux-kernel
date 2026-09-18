@@ -1,0 +1,4 @@
+# One x86-64 gadget per line. Instructions use GNU assembler Intel syntax.
+# Keep the terminating ret in each gadget; blank lines and # comments are ignored.
+
+push rax; pop rdi; add byte ptr [rcx], bh; ret

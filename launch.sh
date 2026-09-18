@@ -38,6 +38,9 @@ echo "[+] Launch log: $RUN_LOG"
 
 KERNEL_IMAGE="${KERNEL_IMAGE:-$SCRIPT_DIR/bzImage}"
 INITRAMFS_IMAGE="${INITRAMFS_IMAGE:-$SCRIPT_DIR/initramfs.cpio.gz}"
+VMLINUX_IMAGE="$SCRIPT_DIR/vmlinux"
+TRASH_GADGETS_FILE="$SCRIPT_DIR/data/tools/trash_gadgets"
+TRASH_GADGETS_STAMP="$SCRIPT_DIR/.trash_gadgets.sha256"
 HOST_SHARE="${HOST_SHARE:-$SCRIPT_DIR/share}"
 WSL_SHARE="${WSL_SHARE:-$HOME}"
 HOST_HOME_SHARE="${HOST_HOME_SHARE:-$HOME}"
@@ -49,6 +52,14 @@ BOOT_USER="${BOOT_USER:-ctf}"
 QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
 QEMU_MEMORY="${QEMU_MEMORY:-512M}"
 QEMU_ACCEL="${QEMU_ACCEL:-auto}"
+
+trash_gadgets_are_current() {
+	local expected actual
+	[ -f "$TRASH_GADGETS_FILE" ] && [ -f "$TRASH_GADGETS_STAMP" ] || return 1
+	expected="$(sha256sum "$TRASH_GADGETS_FILE" | awk '{print $1}')"
+	actual="$(awk 'NR == 1 { print $1 }' "$TRASH_GADGETS_STAMP")"
+	[ "$expected" = "$actual" ]
+}
 
 # Every protection is opt-in: ./launch.sh KASLR SMEP SMAP KPTI NX MITIGATIONS
 # The KALSR spelling is accepted as an alias because it appeared in early notes.
@@ -223,6 +234,14 @@ if [ ! -f "$KERNEL_IMAGE" ] || [ ! -f "$INITRAMFS_IMAGE" ]; then
 	bash "$SCRIPT_DIR/build.sh"
 	if [ ! -f "$KERNEL_IMAGE" ] || [ ! -f "$INITRAMFS_IMAGE" ]; then
 		echo '[-] Build finished without the required runtime artifacts.' >&2
+		exit 1
+	fi
+elif [ "$KERNEL_IMAGE" = "$SCRIPT_DIR/bzImage" ] && \
+	{ [ ! -f "$VMLINUX_IMAGE" ] || ! trash_gadgets_are_current; }; then
+	echo '[+] trash_gadgets changed; rebuilding and relinking vmlinux...'
+	bash "$SCRIPT_DIR/build.sh"
+	if [ ! -f "$VMLINUX_IMAGE" ] || ! trash_gadgets_are_current; then
+		echo '[-] Build finished without an up-to-date vmlinux gadget set.' >&2
 		exit 1
 	fi
 fi

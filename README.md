@@ -152,6 +152,29 @@ The existing demo endpoints are `/dev/pwn-college-char`,
 `/proc/pwn-college-root`. Use `BOOT_USER=root` for a root guest shell. QEMU
 always includes `-s`, so GDB can attach to port 1234.
 
+## Configurable trash gadgets
+
+`data/tools/trash_gadgets` is a deliberately small source file for local CTF
+experiments. Each non-empty line that does not begin with `#` is copied into a
+dedicated x86-64 assembly function in the order written. Use GNU assembler's
+Intel syntax, separate instructions with `;`, and include the terminating
+`ret` yourself. For example:
+
+```asm
+pop rax; ret
+pop rdi; ret
+pop rsi; ret
+push rax; pop rdi; add byte ptr [rcx], bh; ret
+```
+
+`launch.sh` hashes this file before boot. If it changed, it rebuilds and
+relinks the default kernel automatically, and writes the uncompressed ELF to
+the project-root `vmlinux`. The configured default can be checked with:
+
+```bash
+rp --file ./vmlinux --rop 5 | grep -F 'push rax ; pop rdi ; add byte [rcx], bh ; ret'
+```
+
 ## Verify
 
 ```bash
