@@ -81,7 +81,7 @@ int init_module(void)
 	printk(KERN_ALERT "ioctl address: %#lx\b", (unsigned long)device_ioctl);
 	printk(KERN_ALERT "PWN_GET value: %#x\b", PWN_GET);
 	printk(KERN_ALERT "PWN_SET value: %#x\b", PWN_SET);
-	proc_entry = proc_create("pwn-college-ioctl", 0666, NULL, &fops);
+	proc_entry = proc_create("pwn-kernel-ioctl", 0666, NULL, &fops);
 	return proc_entry ? 0 : -ENOMEM;
 }
 

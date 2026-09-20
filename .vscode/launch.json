@@ -8,8 +8,8 @@
       "args": [],
       "stopAtEntry": false,
       "externalConsole": true,
-      "cwd": "e:/kernel-linux/pwn-college/UPDATE-Kernel-Security-Enviroment-in-Pwn.college",
-      "program": "e:/kernel-linux/pwn-college/UPDATE-Kernel-Security-Enviroment-in-Pwn.college/build/Debug/outDebug",
+      "cwd": "e:/kernel-linux/qemu-linux-kernel",
+      "program": "e:/kernel-linux/qemu-linux-kernel/build/Debug/outDebug",
       "MIMode": "gdb",
       "miDebuggerPath": "gdb",
       "setupCommands": [

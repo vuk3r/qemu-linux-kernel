@@ -39,7 +39,7 @@ with tempfile.TemporaryDirectory(prefix=".pwnkernel-smoke-", dir=Path.home()) as
                     output.write(chunk)
                     output.flush()
                     transcript.extend(chunk)
-                if not sent and b"$ " in transcript and b"Welcome to pwn.college" in transcript:
+                if not sent and b"$ " in transcript and b"Welcome to pwn-kernel" in transcript:
                     command = (
                         f"id; uname -r; "
                         f"test -f {guest_d4vicl_share}/host-proof.txt && "

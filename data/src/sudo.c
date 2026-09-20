@@ -43,7 +43,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "sudo: user is not in the sudo group\n");
         return 1;
     }
-    fd = open("/proc/pwn-college-root", O_RDWR | O_CLOEXEC);
+    fd = open("/proc/pwn-kernel-root", O_RDWR | O_CLOEXEC);
     if (fd < 0 || ioctl(fd, PWN_ROOT, 0x13371337UL) != 0) {
         fprintf(stderr, "sudo: cannot acquire root privileges: %s\n", strerror(errno));
         if (fd >= 0)

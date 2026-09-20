@@ -2,3 +2,5 @@
 # Keep the terminating ret in each gadget; blank lines and # comments are ignored.
 
 push rax; pop rdi; add byte ptr [rcx], bh; ret
+pop rdi; ret
+pop rcx; ret

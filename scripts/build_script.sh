@@ -1,0 +1,1 @@
+# gcc -static -O2 ../share/main.c

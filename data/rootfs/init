@@ -32,13 +32,51 @@ kernel_arg() {
 
 custom_modules="$(kernel_arg ctf.modules || true)"
 custom_device_modes="$(kernel_arg ctf.chmod || true)"
+custom_startup="$(kernel_arg ctf.startup || true)"
 custom_test="$(kernel_arg ctf.test || true)"
 custom_test_delay="$(kernel_arg ctf.test_delay || true)"
+gdb_port="$(kernel_arg ctf.gdb_port || true)"
+
+# Export fresh runtime anchors for host-side debug.sh.  Three symbols let the
+# host prove that one relocation slide fits the running kernel and its vmlinux.
+# The file is port-specific so parallel QEMU instances cannot share an offset.
+case "$gdb_port" in
+    ''|*[!0-9]*) ;;
+    *)
+        runtime_symbols_file="/home/ctf/.kernel-runtime-symbols-$gdb_port"
+        runtime_symbols_tmp="$runtime_symbols_file.tmp.$$"
+        runtime_text="$(awk '$3 == "_text" { print $1; exit }' /proc/kallsyms)"
+        runtime_start_kernel="$(awk '$3 == "start_kernel" { print $1; exit }' /proc/kallsyms)"
+        runtime_trash_gadgets="$(awk '$3 == "trash_gadgets" { print $1; exit }' /proc/kallsyms)"
+        boot_id="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || printf unknown)"
+        if [ -n "$runtime_text" ] && [ "$runtime_text" != "0000000000000000" ] &&
+           [ -n "$runtime_start_kernel" ] && [ "$runtime_start_kernel" != "0000000000000000" ] &&
+           [ -n "$runtime_trash_gadgets" ] && [ "$runtime_trash_gadgets" != "0000000000000000" ]; then
+            # hostshare uses 9p passthrough.  Read kallsyms as root, but create
+            # the host file as the share owner (ctf/uid 1000).
+            if {
+                printf 'format=pwn-kernel-debug-v1\n'
+                printf 'boot_id=%s\n' "$boot_id"
+                printf '_text=0x%s\n' "$runtime_text"
+                printf 'start_kernel=0x%s\n' "$runtime_start_kernel"
+                printf 'trash_gadgets=0x%s\n' "$runtime_trash_gadgets"
+            } | /bin/su ctf -c "umask 022; cat > '$runtime_symbols_tmp' && mv -f '$runtime_symbols_tmp' '$runtime_symbols_file'"; then
+                echo "[+] Runtime kernel symbols: $runtime_symbols_file"
+            else
+                /bin/su ctf -c "rm -f '$runtime_symbols_tmp'" 2>/dev/null || true
+                echo '[-] Could not write runtime kernel symbols to hostshare; debug.sh will stay disabled.' >&2
+            fi
+        else
+            /bin/su ctf -c "rm -f '$runtime_symbols_tmp' '$runtime_symbols_file'" 2>/dev/null || true
+            echo '[-] Runtime kernel addresses are hidden; debug.sh cannot calculate the KASLR slide.' >&2
+        fi
+        ;;
+esac
 
 chown 0:0 /flag
 chmod 0600 /flag
 chmod 0644 /*.ko
-# Every module compiled under src/ is copied to / by build.sh and loaded here.
+# Every module compiled under data/src/ is copied to / by build.sh and loaded here.
 for module_path in /*.ko; do
     [ -f "$module_path" ] || continue
     insmod "$module_path"
@@ -85,18 +123,36 @@ if [ -n "$custom_device_modes" ]; then
     IFS="$old_ifs"
 fi
 
-major=$(awk '$2 == "pwn-college-char" { print $1 }' /proc/devices)
+major=$(awk '$2 == "pwn-kernel-char" { print $1 }' /proc/devices)
 test -n "$major"
-mknod /dev/pwn-college-char c "$major" 0
-chmod 0666 /dev/pwn-college-char
+mknod /dev/pwn-kernel-char c "$major" 0
+chmod 0666 /dev/pwn-kernel-char
 sysctl -w kernel.perf_event_paranoid=1
 
+# The launcher stages scripts/vm-startup.sh (or --startup) into a mounted
+# share. Run it as root only after mounts, modules, and default endpoints are
+# ready. A failed user command is reported but does not prevent an interactive
+# shell from starting.
+if [ -n "$custom_startup" ]; then
+    case "$custom_startup" in
+        /home/d4vicl/*|/mnt/wsl/*|/home/ctf/.launch-artifacts/*) ;;
+        *) echo "[-] Refusing startup script outside shared directories: $custom_startup" >&2; exit 1 ;;
+    esac
+    [ -r "$custom_startup" ] || { echo "[-] Startup script not readable: $custom_startup" >&2; exit 1; }
+    echo "[+] Running startup script as root: $custom_startup"
+    set +e
+    /bin/sh "$custom_startup"
+    startup_status=$?
+    set -e
+    echo "[+] Startup script exit status: $startup_status"
+fi
+
 echo
-echo "Welcome to pwn.college - Linux $(uname -r)"
+echo "Welcome to pwn-kernel - Linux $(uname -r)"
 echo 'Shared WSL directory: /mnt/wsl'
 echo 'Host home shortcut: ~/host'
 echo 'Persistent host directory: /home/d4vicl'
-echo 'Module interfaces: /dev/pwn-college-char, /proc/pwn-college-*'
+echo 'Module interfaces: /dev/pwn-kernel-char, /proc/pwn-kernel-*'
 echo
 
 # Run an optional shared test as ctf, then leave an interactive shell for

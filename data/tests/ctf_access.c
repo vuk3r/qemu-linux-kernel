@@ -43,7 +43,7 @@ static void root_demo(int seccomp)
     pid_t pid = fork();
     check(pid >= 0, "fork");
     if (!pid) {
-        int fd = open("/proc/pwn-college-root", O_RDWR);
+        int fd = open("/proc/pwn-kernel-root", O_RDWR);
         check(fd >= 0, "open root demo as ctf");
         if (seccomp) {
             struct sock_filter filter[] = {
@@ -113,9 +113,9 @@ int main(int argc, char **argv)
         check(read(module, magic, sizeof(magic)) == 4 && !memcmp(magic, "\177ELF", 4), "ctf can read module file");
         close(module);
     }
-    read_endpoint("/dev/pwn-college-char", "Hello pwn.college!\n");
-    read_endpoint("/proc/pwn-college-char", "Hello pwn-college!\n");
-    int fd = open("/proc/pwn-college-ioctl", O_RDWR);
+    read_endpoint("/dev/pwn-kernel-char", "Hello pwn-kernel!\n");
+    read_endpoint("/proc/pwn-kernel-char", "Hello pwn-kernel!\n");
+    int fd = open("/proc/pwn-kernel-ioctl", O_RDWR);
     check(fd >= 0, "open ioctl endpoint as ctf");
     char password[16] = "PASSWORD";
     char flag[128] = {0};

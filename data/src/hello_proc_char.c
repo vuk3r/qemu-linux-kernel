@@ -20,7 +20,7 @@ static int device_release(struct inode *inode, struct file *filp)
 
 static ssize_t device_read(struct file *filp, char *buffer, size_t length, loff_t *offset)
 {
-	char *msg = "Hello pwn-college!\n";
+	char *msg = "Hello pwn-kernel!\n";
 	return simple_read_from_buffer(buffer, length, offset, msg, strlen(msg));
 }
 
@@ -41,15 +41,15 @@ struct proc_dir_entry *proc_entry = NULL;
 
 int init_module(void)
 {
-	proc_entry = proc_create("pwn-college-char", 0666, NULL, &fops);
+	proc_entry = proc_create("pwn-kernel-char", 0666, NULL, &fops);
         if (!proc_entry)
                 return -ENOMEM;
-	printk(KERN_ALERT "/proc/pwn-college-char created!");
+	printk(KERN_ALERT "/proc/pwn-kernel-char created!");
 	return 0;
 }
 
 void cleanup_module(void)
 {
 	if (proc_entry) proc_remove(proc_entry);
-	printk(KERN_ALERT "/proc/pwn-college-char removed!");
+	printk(KERN_ALERT "/proc/pwn-kernel-char removed!");
 }

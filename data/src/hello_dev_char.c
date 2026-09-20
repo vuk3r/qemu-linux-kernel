@@ -21,7 +21,7 @@ static int device_release(struct inode *inode, struct file *filp)
 
 static ssize_t device_read(struct file *filp, char *buffer, size_t length, loff_t *offset)
 {
-	char *msg = "Hello pwn.college!\n";
+	char *msg = "Hello pwn-kernel!\n";
 	return simple_read_from_buffer(buffer, length, offset, msg, strlen(msg));
 }
 
@@ -41,7 +41,7 @@ static struct file_operations fops = {
 
 int init_module(void)
 {
-	major_number = register_chrdev(0, "pwn-college-char", &fops);
+	major_number = register_chrdev(0, "pwn-kernel-char", &fops);
 
 	if (major_number < 0) {
 		printk(KERN_ALERT "Registering char device failed with %d\n", major_number);
@@ -49,11 +49,11 @@ int init_module(void)
 	}
 
 	printk(KERN_INFO "I was assigned major number %d.\n", major_number);
-	printk(KERN_INFO "Create device with: 'mknod /dev/pwn-college-char c %d 0'.\n", major_number);
+	printk(KERN_INFO "Create device with: 'mknod /dev/pwn-kernel-char c %d 0'.\n", major_number);
 	return 0;
 }
 
 void cleanup_module(void)
 {
-	unregister_chrdev(major_number, "pwn-college-char");
+	unregister_chrdev(major_number, "pwn-kernel-char");
 }

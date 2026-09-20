@@ -4,24 +4,34 @@ set -Eeuo pipefail
 export KERNEL_VERSION=6.8.9
 export BUSYBOX_VERSION=1.32.0
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DATA_DIR="$SCRIPT_DIR/data"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+DATA_DIR="$PROJECT_DIR/data"
 ROOTFS_DIR="$DATA_DIR/rootfs"
 MODULE_DIR="$DATA_DIR/src"
 TOOLS_DIR="$DATA_DIR/tools"
-LOG_DIR="$SCRIPT_DIR/log"
-RUNTIME_KERNEL_IMAGE="$SCRIPT_DIR/bzImage"
-RUNTIME_INITRAMFS="$SCRIPT_DIR/initramfs.cpio.gz"
-RUNTIME_VMLINUX="$SCRIPT_DIR/vmlinux"
+LOG_DIR="$PROJECT_DIR/log"
+RUNTIME_DIR="$PROJECT_DIR/src"
+RUNTIME_KERNEL_IMAGE="$RUNTIME_DIR/bzImage"
+RUNTIME_INITRAMFS="$RUNTIME_DIR/initramfs.cpio.gz"
+RUNTIME_VMLINUX="$RUNTIME_DIR/vmlinux"
 TRASH_GADGETS_FILE="$TOOLS_DIR/trash_gadgets"
-TRASH_GADGETS_STAMP="$SCRIPT_DIR/.trash_gadgets.sha256"
-cd "$SCRIPT_DIR"
+TRASH_GADGETS_STAMP="$RUNTIME_DIR/.trash_gadgets.sha256"
+TRASH_GADGETS_FORMAT="pwn-kernel-v3"
+KERNEL_SSP_STAMP="$RUNTIME_DIR/.kernel_ssp"
+KERNEL_SSP="${KERNEL_SSP:-0}"
+cd "$PROJECT_DIR"
 
 if [ "$(uname -s)" != "Linux" ]; then
   echo "[-] This project builds on Linux only." >&2
   exit 1
 fi
 
-mkdir -p "$LOG_DIR"
+case "$KERNEL_SSP" in
+  0|1) ;;
+  *) echo "[-] KERNEL_SSP must be 0 or 1, got: $KERNEL_SSP" >&2; exit 2 ;;
+esac
+
+mkdir -p "$LOG_DIR" "$RUNTIME_DIR"
 BUILD_LOG="$LOG_DIR/build-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
 exec 3>&1 4>&2
 exec > >(tee -a "$BUILD_LOG")
@@ -45,16 +55,27 @@ finish_logging_on_exit() {
 trap finish_logging_on_exit EXIT
 
 echo "[+] Build log: $BUILD_LOG"
+if [ "$KERNEL_SSP" = "1" ]; then
+  echo '[+] Kernel SSP: enabled (CONFIG_STACKPROTECTOR_STRONG)'
+else
+  echo '[+] Kernel SSP: disabled'
+fi
 
 if [ ! -f "$TRASH_GADGETS_FILE" ]; then
   echo "[-] Missing gadget source: $TRASH_GADGETS_FILE" >&2
   exit 1
 fi
 TRASH_GADGETS_HASH="$(sha256sum "$TRASH_GADGETS_FILE" | awk '{print $1}')"
+TRASH_GADGETS_STAMP_VALUE="$TRASH_GADGETS_FORMAT:$TRASH_GADGETS_HASH"
 
 trash_gadgets_are_current() {
   [ -f "$TRASH_GADGETS_STAMP" ] && \
-    [ "$(awk 'NR == 1 { print $1 }' "$TRASH_GADGETS_STAMP")" = "$TRASH_GADGETS_HASH" ]
+    [ "$(awk 'NR == 1 { print $1 }' "$TRASH_GADGETS_STAMP")" = "$TRASH_GADGETS_STAMP_VALUE" ]
+}
+
+kernel_ssp_stamp_is_current() {
+  [ -f "$KERNEL_SSP_STAMP" ] && \
+    [ "$(awk 'NR == 1 { print $1 }' "$KERNEL_SSP_STAMP")" = "$KERNEL_SSP" ]
 }
 
 # The input file intentionally stays simple: its non-comment lines are GNU
@@ -63,7 +84,9 @@ trash_gadgets_are_current() {
 # between the requested instructions.
 install_trash_gadgets() {
   local kernel_dir="$1"
-  local source_file="$kernel_dir/arch/x86/kernel/pwn_college_trash_gadgets.S"
+  local source_file="$kernel_dir/arch/x86/kernel/trash_gadgets.S"
+  local legacy_source="$kernel_dir/arch/x86/kernel/pwn_college_trash_gadgets.S"
+  local legacy_pwn_kernel_source="$kernel_dir/arch/x86/kernel/pwn_kernel_trash_gadgets.S"
   local makefile="$kernel_dir/arch/x86/kernel/Makefile"
   local temporary_source="${source_file}.part"
 
@@ -74,9 +97,9 @@ install_trash_gadgets() {
 	.text
 	.intel_syntax noprefix
 	.balign 16
-	.global pwn_college_trash_gadgets
-	.type pwn_college_trash_gadgets, @function
-pwn_college_trash_gadgets:
+	.global trash_gadgets
+	.type trash_gadgets, @function
+trash_gadgets:
 EOF
     while IFS= read -r line || [ -n "$line" ]; do
       line="${line#"${line%%[![:space:]]*}"}"
@@ -86,7 +109,7 @@ EOF
       printf '\t%s\n' "$line"
     done < "$TRASH_GADGETS_FILE"
     cat <<'EOF'
-	.size pwn_college_trash_gadgets, . - pwn_college_trash_gadgets
+	.size trash_gadgets, . - trash_gadgets
 	.att_syntax prefix
 EOF
   } > "$temporary_source"
@@ -98,23 +121,42 @@ EOF
     TRASH_GADGETS_CHANGED=1
   fi
 
-  if ! grep -Fqx 'obj-y += pwn_college_trash_gadgets.o' "$makefile"; then
+  if [ -e "$legacy_source" ]; then
+    rm -f -- "$legacy_source"
+    TRASH_GADGETS_CHANGED=1
+  fi
+  if [ -e "$legacy_pwn_kernel_source" ]; then
+    rm -f -- "$legacy_pwn_kernel_source"
+    TRASH_GADGETS_CHANGED=1
+  fi
+  if grep -Fqx 'obj-y += pwn_college_trash_gadgets.o' "$makefile"; then
+    sed -i '\|^obj-y += pwn_college_trash_gadgets\.o$|d' "$makefile"
+    TRASH_GADGETS_CHANGED=1
+  fi
+  if grep -Fqx 'obj-y += pwn_kernel_trash_gadgets.o' "$makefile"; then
+    sed -i '\|^obj-y += pwn_kernel_trash_gadgets\.o$|d' "$makefile"
+    TRASH_GADGETS_CHANGED=1
+  fi
+
+  if ! grep -Fqx 'obj-y += trash_gadgets.o' "$makefile"; then
     {
       printf '\n# Locally configured teaching/CTF ROP gadgets.\n'
-      printf 'obj-y += pwn_college_trash_gadgets.o\n'
+      printf 'obj-y += trash_gadgets.o\n'
     } >> "$makefile"
     TRASH_GADGETS_CHANGED=1
   fi
 }
 
-JOBS="${JOBS:-2}"
+# Default to every CPU currently available to WSL/the process.  Callers can
+# still lower this with JOBS=N when they need to keep the machine responsive.
+JOBS="${JOBS:-$(nproc)}"
 if [ -z "${BUILD_DIR:-}" ]; then
   # A project below /mnt/<drive> is normally on NTFS/FAT, where the kernel
   # tree cannot be built safely because source names may differ only by case.
   # Keep its real source/build tree on the Linux filesystem instead.
-  case "$SCRIPT_DIR" in
+  case "$PROJECT_DIR" in
     /mnt/[a-z]/*)
-      project_id="$(printf '%s' "$SCRIPT_DIR" | sha256sum | cut -c1-16)"
+      project_id="$(printf '%s' "$PROJECT_DIR" | sha256sum | cut -c1-16)"
       BUILD_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/pwnkernel/$project_id"
       ;;
     *) BUILD_DIR="$DATA_DIR/build" ;;
@@ -169,8 +211,23 @@ fi
 install_trash_gadgets "linux-$KERNEL_VERSION"
 
 kernel_security_config_ok() {
-  grep -qx 'CONFIG_INIT_STACK_NONE=y' "linux-$KERNEL_VERSION/.config" 2>/dev/null && \
+  grep -qx 'CONFIG_PAGE_TABLE_ISOLATION=y' "linux-$KERNEL_VERSION/.config" 2>/dev/null && \
+    grep -qx 'CONFIG_INIT_STACK_NONE=y' "linux-$KERNEL_VERSION/.config" 2>/dev/null && \
     grep -qx '# CONFIG_VMAP_STACK is not set' "linux-$KERNEL_VERSION/.config" 2>/dev/null
+}
+
+kernel_ssp_config_ok() {
+  case "$KERNEL_SSP" in
+    1)
+      grep -qx 'CONFIG_STACKPROTECTOR=y' "linux-$KERNEL_VERSION/.config" 2>/dev/null && \
+        grep -qx 'CONFIG_STACKPROTECTOR_STRONG=y' "linux-$KERNEL_VERSION/.config" 2>/dev/null
+      ;;
+    0)
+      # STACKPROTECTOR_STRONG becomes invisible when its parent is disabled,
+      # so Kconfig does not necessarily emit a separate "not set" line.
+      grep -qx '# CONFIG_STACKPROTECTOR is not set' "linux-$KERNEL_VERSION/.config" 2>/dev/null
+      ;;
+  esac
 }
 
 if [ "${FORCE_KERNEL_REBUILD:-0}" != "1" ] && \
@@ -179,7 +236,9 @@ if [ "${FORCE_KERNEL_REBUILD:-0}" != "1" ] && \
   [ -f linux-$KERNEL_VERSION/Module.symvers ] && \
   [ "$TRASH_GADGETS_CHANGED" = "0" ] && \
   trash_gadgets_are_current && \
-  kernel_security_config_ok; then
+  kernel_ssp_stamp_is_current && \
+  kernel_security_config_ok && \
+  kernel_ssp_config_ok; then
 	echo "[+] Using existing kernel image linux-$KERNEL_VERSION/arch/x86/boot/bzImage."
 else
 	echo "[+] Building kernel (or refreshing its security configuration)..."
@@ -192,9 +251,25 @@ else
     -e VIRTIO_BALLOON -e VIRTIO_INPUT -e CRYPTO_DEV_VIRTIO \
     -e GDB_SCRIPTS -e DEBUG_FS -d DEBUG_INFO_NONE -e DEBUG_INFO_DWARF4 \
     -d DEBUG_INFO_BTF -d WERROR \
+    -e PAGE_TABLE_ISOLATION \
     -e INIT_STACK_NONE -d INIT_STACK_ALL_PATTERN -d INIT_STACK_ALL_ZERO \
     -d VMAP_STACK
+  if [ "$KERNEL_SSP" = "1" ]; then
+    linux-$KERNEL_VERSION/scripts/config --file linux-$KERNEL_VERSION/.config \
+      -e STACKPROTECTOR -e STACKPROTECTOR_STRONG
+  else
+    linux-$KERNEL_VERSION/scripts/config --file linux-$KERNEL_VERSION/.config \
+      -d STACKPROTECTOR_STRONG -d STACKPROTECTOR
+  fi
   make -C linux-$KERNEL_VERSION olddefconfig
+  if ! kernel_security_config_ok; then
+    echo '[-] PAGE_TABLE_ISOLATION or a required kernel security configuration is unavailable.' >&2
+    exit 1
+  fi
+  if ! kernel_ssp_config_ok; then
+    echo "[-] Requested SSP=$KERNEL_SSP is unavailable with this kernel/compiler configuration." >&2
+    exit 1
+  fi
   # These boot stages reset KBUILD_CFLAGS and otherwise inherit GCC 15's
   # C23 default, which conflicts with the 6.8 kernel's bool/false definitions.
   sed -i 's/^KBUILD_CFLAGS[[:space:]]*:= $(subst /KBUILD_CFLAGS := -std=gnu11 $(subst /' \
@@ -202,8 +277,6 @@ else
   sed -i 's/^KBUILD_CFLAGS := -m$(BITS)/KBUILD_CFLAGS := -std=gnu11 -m$(BITS)/' \
     linux-$KERNEL_VERSION/arch/x86/boot/compressed/Makefile
   make -C linux-$KERNEL_VERSION -j"$JOBS" bzImage modules
-  printf '%s\n' "$TRASH_GADGETS_HASH" > "${TRASH_GADGETS_STAMP}.part"
-  mv -- "${TRASH_GADGETS_STAMP}.part" "$TRASH_GADGETS_STAMP"
 fi
 #
 # Busybox
@@ -245,6 +318,10 @@ make -C "$MODULE_DIR" KERNEL_DIR="$BUILD_DIR/linux-$KERNEL_VERSION"
 cp "$MODULE_DIR"/*.ko "$ROOTFS_DIR/"
 
 echo "[+] Packaging runtime artifacts..."
+# Invalidate the runtime profile before replacing any artifact.  If packaging
+# fails halfway through, launch.sh will rebuild instead of trusting a stamp
+# that describes the previous bzImage/vmlinux pair.
+rm -f -- "$TRASH_GADGETS_STAMP" "$KERNEL_SSP_STAMP"
 install -m 0644 "linux-$KERNEL_VERSION/arch/x86/boot/bzImage" "$RUNTIME_KERNEL_IMAGE"
 install -m 0644 "linux-$KERNEL_VERSION/vmlinux" "$RUNTIME_VMLINUX"
 initramfs_part="$RUNTIME_INITRAMFS.part"
@@ -253,5 +330,14 @@ pushd "$ROOTFS_DIR" >/dev/null
 find . -print0 | cpio --null -o --format=newc --owner=0:0 --quiet | gzip -9 > "$initramfs_part"
 popd >/dev/null
 mv -- "$initramfs_part" "$RUNTIME_INITRAMFS"
+
+# Only publish the input/profile stamps after every runtime artifact is ready.
+# Together with the invalidation above, a packaging failure can never make an
+# old profile describe a partly replaced runtime kernel.
+printf '%s\n' "$TRASH_GADGETS_STAMP_VALUE" > "${TRASH_GADGETS_STAMP}.part"
+mv -- "${TRASH_GADGETS_STAMP}.part" "$TRASH_GADGETS_STAMP"
+printf '%s\n' "$KERNEL_SSP" > "${KERNEL_SSP_STAMP}.part"
+mv -- "${KERNEL_SSP_STAMP}.part" "$KERNEL_SSP_STAMP"
+
 BUILD_DIR="$BUILD_DIR" bash "$SCRIPT_DIR/clean.sh" after-build
-echo "[+] Build complete. Run ./launch.sh from $SCRIPT_DIR."
+echo "[+] Build complete. Run ./launch.sh from $PROJECT_DIR."

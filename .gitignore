@@ -23,6 +23,9 @@ vmlinux*
 initramfs*.cpio*
 /bzImage
 /.trash_gadgets.sha256
+/src/bzImage
+/src/.trash_gadgets.sha256
+/src/.kernel_ssp
 /data/rootfs/bin/
 /data/rootfs/sbin/
 /data/rootfs/usr/

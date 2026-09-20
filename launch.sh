@@ -2,8 +2,12 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPTS_DIR="$SCRIPT_DIR/scripts"
 LOG_DIR="$SCRIPT_DIR/log"
-CLEAN_SCRIPT="$SCRIPT_DIR/clean.sh"
+CLEAN_SCRIPT="$SCRIPTS_DIR/clean.sh"
+BUILD_SCRIPT="$SCRIPTS_DIR/build.sh"
+HOST_PRELAUNCH_SCRIPT="$SCRIPTS_DIR/init.sh"
+RUNTIME_DIR="$SCRIPT_DIR/src"
 cd "$SCRIPT_DIR"
 
 if [ "$(uname -s)" != "Linux" ]; then
@@ -36,32 +40,51 @@ trap finish_logging_on_exit EXIT
 
 echo "[+] Launch log: $RUN_LOG"
 
-KERNEL_IMAGE="${KERNEL_IMAGE:-$SCRIPT_DIR/bzImage}"
-INITRAMFS_IMAGE="${INITRAMFS_IMAGE:-$SCRIPT_DIR/initramfs.cpio.gz}"
-VMLINUX_IMAGE="$SCRIPT_DIR/vmlinux"
+# Optional host-side setup hook. It runs before QEMU; guest commands belong in
+# scripts/vm-startup.sh instead.
+if [ -f "$HOST_PRELAUNCH_SCRIPT" ]; then
+	echo "[+] Host pre-launch script: $HOST_PRELAUNCH_SCRIPT"
+	bash "$HOST_PRELAUNCH_SCRIPT"
+fi
+
+KERNEL_IMAGE="${KERNEL_IMAGE:-$RUNTIME_DIR/bzImage}"
+INITRAMFS_IMAGE="${INITRAMFS_IMAGE:-$RUNTIME_DIR/initramfs.cpio.gz}"
+VMLINUX_IMAGE="$RUNTIME_DIR/vmlinux"
 TRASH_GADGETS_FILE="$SCRIPT_DIR/data/tools/trash_gadgets"
-TRASH_GADGETS_STAMP="$SCRIPT_DIR/.trash_gadgets.sha256"
+TRASH_GADGETS_STAMP="$RUNTIME_DIR/.trash_gadgets.sha256"
+TRASH_GADGETS_FORMAT="pwn-kernel-v3"
+KERNEL_SSP_STAMP="$RUNTIME_DIR/.kernel_ssp"
+DEFAULT_STARTUP_SCRIPT="$SCRIPTS_DIR/vm-startup.sh"
 HOST_SHARE="${HOST_SHARE:-$SCRIPT_DIR/share}"
 WSL_SHARE="${WSL_SHARE:-$HOME}"
 HOST_HOME_SHARE="${HOST_HOME_SHARE:-$HOME}"
 # The host directory can live anywhere; the guest always sees it at
 # /home/d4vicl.  A path below $HOME works for a freshly-cloned project
 # without requiring permission to create another user's home directory.
-D4VICL_SHARE="${D4VICL_SHARE:-$HOME/pwn-college-share}"
+D4VICL_SHARE="${D4VICL_SHARE:-$HOME/pwn-kernel-share}"
 BOOT_USER="${BOOT_USER:-ctf}"
 QEMU_BIN="${QEMU_BIN:-qemu-system-x86_64}"
 QEMU_MEMORY="${QEMU_MEMORY:-512M}"
 QEMU_ACCEL="${QEMU_ACCEL:-auto}"
+QEMU_GDB_PORT="${QEMU_GDB_PORT:-1234}"
 
 trash_gadgets_are_current() {
 	local expected actual
 	[ -f "$TRASH_GADGETS_FILE" ] && [ -f "$TRASH_GADGETS_STAMP" ] || return 1
-	expected="$(sha256sum "$TRASH_GADGETS_FILE" | awk '{print $1}')"
+	expected="$TRASH_GADGETS_FORMAT:$(sha256sum "$TRASH_GADGETS_FILE" | awk '{print $1}')"
 	actual="$(awk 'NR == 1 { print $1 }' "$TRASH_GADGETS_STAMP")"
 	[ "$expected" = "$actual" ]
 }
 
-# Every protection is opt-in: ./launch.sh KASLR SMEP SMAP KPTI NX MITIGATIONS
+ssp_is_current() {
+	local actual
+	[ -f "$KERNEL_SSP_STAMP" ] || return 1
+	actual="$(awk 'NR == 1 { print $1 }' "$KERNEL_SSP_STAMP")"
+	[ "$actual" = "$ssp" ]
+}
+
+# Every protection is opt-in: ./launch.sh KASLR SMEP SMAP KPTI NX MITIGATIONS SSP
+# ALL is the shorthand for the complete set above.
 # The KALSR spelling is accepted as an alias because it appeared in early notes.
 kaslr=0
 smep=0
@@ -69,18 +92,28 @@ smap=0
 kpti=0
 nx=0
 mitigations=0
+ssp=0
+build_requested=0
 
 usage() {
 	cat <<'EOF'
-Usage: ./launch.sh [protections...] [--module HOST_KO]... [--chmod GUEST_PATH:MODE]... [--test HOST_TEST] [--test-delay SECONDS]
+Usage: ./launch.sh [protections...] [--build] [--module HOST_KO]... [--chmod GUEST_PATH:MODE]... [--startup HOST_SCRIPT|--no-startup] [--test HOST_TEST] [--test-delay SECONDS]
 
-Enable only the named runtime protections. All protections not listed are
-disabled. KALSR is accepted as an alias for the correctly spelled KASLR.
+Enable only the named protections. All protections not listed are disabled.
+By default this command only boots artifacts already in src/; it never starts
+a build. SSP is build-time, so use --build to apply an SSP change. KALSR is
+accepted as an alias for the correctly spelled KASLR.
 
-Protections: KASLR, SMEP, SMAP, KPTI, NX, MITIGATIONS
+Protections: KASLR, SMEP, SMAP, KPTI, NX, MITIGATIONS, SSP, ALL
+ALL:         enable every protection above.
+--build:      build/refresh default artifacts before booting. The build is
+              incremental when its inputs are already current.
 --module: an existing .ko; it is insmod'ed after the shares mount.
 --chmod:  set a /dev or /proc endpoint mode after modules load (for example,
           --chmod /dev/my-device:666). Repeat this option as needed.
+--startup: run a host shell script as root in the guest after shares, modules,
+           and endpoint modes are ready. Defaults to scripts/vm-startup.sh.
+--no-startup: disable the default startup script for this boot.
 --test:   an executable; it runs as ctf after modules load.
 --test-delay: wait before the test runs (default: 0 seconds).
 
@@ -93,12 +126,15 @@ custom_modules=()
 custom_device_modes=()
 custom_test=""
 custom_test_delay=0
+startup_script="${STARTUP_SCRIPT:-$DEFAULT_STARTUP_SCRIPT}"
+custom_startup=""
 
 stage_artifact() {
 	local host_path="$1" kind="$2" digest destination mode suffix
 	digest="$(sha256sum "$host_path" | awk '{print $1}')"
 	case "$kind" in
 		module) mode=0644; suffix=.ko ;;
+		startup) mode=0755; suffix=.sh ;;
 		test) mode=0755; suffix='' ;;
 		*) echo "[-] Internal error: unknown artifact type $kind." >&2; exit 1 ;;
 	esac
@@ -153,6 +189,15 @@ add_device_mode() {
 	custom_device_modes+=("$device_path:$mode")
 }
 
+set_startup_script() {
+	local host_path="$1"
+	if [ ! -f "$host_path" ] || [ ! -r "$host_path" ]; then
+		echo "[-] Startup script must be a readable file: $host_path" >&2
+		exit 2
+	fi
+	startup_script="$host_path"
+}
+
 set_custom_test() {
 	local host_path="$1"
 	if [ -n "$custom_test" ]; then
@@ -173,10 +218,15 @@ set_custom_test_delay() {
 	esac
 }
 
+# Clear artifacts from the previous boot before option parsing stages the
+# modules, tests, or startup script requested for this boot.
+bash "$CLEAN_SCRIPT" before-run
+
 while [ "$#" -gt 0 ]; do
 	argument="$1"
 	case "$argument" in
 		-h|--help|HELP) usage; exit 0 ;;
+		--build) build_requested=1 ;;
 		--module)
 			[ "$#" -ge 2 ] || { echo '[-] --module needs a path.' >&2; exit 2; }
 			add_custom_module "$2"
@@ -191,6 +241,14 @@ while [ "$#" -gt 0 ]; do
 			continue
 			;;
 		--chmod=*) add_device_mode "${argument#--chmod=}" ;;
+		--startup)
+			[ "$#" -ge 2 ] || { echo '[-] --startup needs a script path.' >&2; exit 2; }
+			set_startup_script "$2"
+			shift 2
+			continue
+			;;
+		--startup=*) set_startup_script "${argument#--startup=}" ;;
+		--no-startup) startup_script="" ;;
 		--test)
 			[ "$#" -ge 2 ] || { echo '[-] --test needs a path.' >&2; exit 2; }
 			set_custom_test "$2"
@@ -213,6 +271,16 @@ while [ "$#" -gt 0 ]; do
 				KPTI|PTI) kpti=1 ;;
 				NX) nx=1 ;;
 				MITIGATIONS|MITIGATION) mitigations=1 ;;
+				SSP) ssp=1 ;;
+				ALL)
+					kaslr=1
+					smep=1
+					smap=1
+					kpti=1
+					nx=1
+					mitigations=1
+					ssp=1
+					;;
 				*)
 					echo "[-] Unknown protection or option: $argument" >&2
 					usage >&2
@@ -224,27 +292,53 @@ while [ "$#" -gt 0 ]; do
 	shift
 done
 
-if [ ! -f "$KERNEL_IMAGE" ] || [ ! -f "$INITRAMFS_IMAGE" ]; then
-	if [ "$KERNEL_IMAGE" != "$SCRIPT_DIR/bzImage" ] || \
-	   [ "$INITRAMFS_IMAGE" != "$SCRIPT_DIR/initramfs.cpio.gz" ]; then
-		echo '[-] A custom KERNEL_IMAGE or INITRAMFS_IMAGE is missing; refusing to replace it with a default build.' >&2
+if [ -n "$startup_script" ]; then
+	set_startup_script "$startup_script"
+	custom_startup="$(to_guest_path "$startup_script" startup)"
+fi
+
+# A supplied kernel is opaque to this launcher: SSP lives in compiler output,
+# so it cannot be toggled or verified through QEMU command-line arguments.
+if [ "$KERNEL_IMAGE" != "$RUNTIME_DIR/bzImage" ] && [ "$ssp" = "1" ]; then
+	echo '[-] SSP requires the project default kernel. Remove KERNEL_IMAGE or rebuild your custom kernel with stack protection enabled.' >&2
+	exit 1
+fi
+if [ "$KERNEL_IMAGE" != "$RUNTIME_DIR/bzImage" ]; then
+	echo '[!] Custom KERNEL_IMAGE supplied; its SSP state is not managed by launch.sh.' >&2
+fi
+
+if [ "$build_requested" = "1" ]; then
+	if [ "$KERNEL_IMAGE" != "$RUNTIME_DIR/bzImage" ] || \
+	   [ "$INITRAMFS_IMAGE" != "$RUNTIME_DIR/initramfs.cpio.gz" ]; then
+		echo '[-] --build only builds the project default artifacts in src/; remove custom KERNEL_IMAGE/INITRAMFS_IMAGE first.' >&2
 		exit 1
 	fi
-	echo '[+] Runtime artifacts are missing; starting the Linux build and dependency setup...'
-	bash "$SCRIPT_DIR/build.sh"
-	if [ ! -f "$KERNEL_IMAGE" ] || [ ! -f "$INITRAMFS_IMAGE" ]; then
-		echo '[-] Build finished without the required runtime artifacts.' >&2
+	echo '[+] --build requested; refreshing default artifacts...'
+	KERNEL_SSP="$ssp" bash "$BUILD_SCRIPT"
+	if [ ! -f "$KERNEL_IMAGE" ] || [ ! -f "$INITRAMFS_IMAGE" ] || \
+	   [ ! -f "$VMLINUX_IMAGE" ] || ! trash_gadgets_are_current || ! ssp_is_current; then
+		echo '[-] Build finished without the requested default artifact profile.' >&2
 		exit 1
 	fi
-elif [ "$KERNEL_IMAGE" = "$SCRIPT_DIR/bzImage" ] && \
-	{ [ ! -f "$VMLINUX_IMAGE" ] || ! trash_gadgets_are_current; }; then
-	echo '[+] trash_gadgets changed; rebuilding and relinking vmlinux...'
-	bash "$SCRIPT_DIR/build.sh"
-	if [ ! -f "$VMLINUX_IMAGE" ] || ! trash_gadgets_are_current; then
-		echo '[-] Build finished without an up-to-date vmlinux gadget set.' >&2
-		exit 1
+elif [ ! -f "$KERNEL_IMAGE" ] || [ ! -f "$INITRAMFS_IMAGE" ]; then
+	echo '[-] Runtime artifacts are missing. Build them explicitly with: ./launch.sh --build' >&2
+	exit 1
+elif [ "$KERNEL_IMAGE" = "$RUNTIME_DIR/bzImage" ]; then
+	if [ ! -f "$VMLINUX_IMAGE" ]; then
+		echo '[!] src/vmlinux is missing; VM will boot, but debug.sh cannot load symbols. Run ./launch.sh --build to restore it.' >&2
+	fi
+	if ! trash_gadgets_are_current; then
+		echo '[!] data/tools/trash_gadgets differs from the booted artifact; reusing it. Run ./launch.sh --build to apply it.' >&2
+	fi
+	if ! ssp_is_current; then
+		actual_ssp="$(awk 'NR == 1 { print $1 }' "$KERNEL_SSP_STAMP" 2>/dev/null || true)"
+		echo "[!] Requested SSP=$ssp, but the existing kernel SSP profile is ${actual_ssp:-unknown}; reusing it. Run ./launch.sh --build to change SSP." >&2
+	else
+		echo '[+] Reusing existing kernel artifacts (no --build requested).'
 	fi
 fi
+
+artifact_ssp="$(awk 'NR == 1 { print $1 }' "$KERNEL_SSP_STAMP" 2>/dev/null || true)"
 
 if ! command -v "$QEMU_BIN" >/dev/null 2>&1; then
 	echo "[-] Missing $QEMU_BIN. Install qemu-system-x86 or use the Docker wrapper." >&2
@@ -255,16 +349,26 @@ case "$BOOT_USER" in
   ctf|root) ;;
   *) echo '[-] BOOT_USER must be ctf or root.' >&2; exit 1 ;;
 esac
+
+case "$QEMU_GDB_PORT" in
+  ''|*[!0-9]*) echo "[-] QEMU_GDB_PORT must be a TCP port number." >&2; exit 2 ;;
+esac
+if [ "$QEMU_GDB_PORT" -lt 1 ] || [ "$QEMU_GDB_PORT" -gt 65535 ]; then
+	echo "[-] QEMU_GDB_PORT must be between 1 and 65535." >&2
+	exit 2
+fi
 mkdir -p "$HOST_SHARE" "$HOST_SHARE/host" "$WSL_SHARE" "$HOST_HOME_SHARE" "$D4VICL_SHARE"
+RUNTIME_SYMBOLS_FILE="$HOST_SHARE/.kernel-runtime-symbols-$QEMU_GDB_PORT"
+rm -f -- "$RUNTIME_SYMBOLS_FILE"
 echo "[+] Project share: $HOST_SHARE -> /home/ctf"
 echo "[+] Host home share: $WSL_SHARE -> /mnt/wsl (read/write)"
 echo "[+] Host home shortcut: $HOST_HOME_SHARE -> /home/ctf/host (read/write)"
 echo "[+] Persistent d4vicl share: $D4VICL_SHARE -> /home/d4vicl (read/write)"
-bash "$CLEAN_SCRIPT" before-run
 
 cleanup_after_run() {
 	status=$?
 	trap - EXIT
+	rm -f -- "$RUNTIME_SYMBOLS_FILE"
 	bash "$CLEAN_SCRIPT" after-run || true
 	finish_logging "$status"
 }
@@ -289,9 +393,9 @@ if [ "$smap" = "1" ]; then cpu_features+=(+smap); else cpu_features+=(-smap); fi
 if [ "$nx" = "1" ]; then cpu_features+=(+nx); else cpu_features+=(-nx); fi
 QEMU_CPU="qemu64,$(IFS=,; echo "${cpu_features[*]}")"
 
-kernel_args=(console=ttyS0 panic=-1 "ctf.shell=$BOOT_USER")
+kernel_args=(console=ttyS0 panic=-1 "ctf.shell=$BOOT_USER" "ctf.gdb_port=$QEMU_GDB_PORT")
 if [ "$kaslr" = "0" ]; then kernel_args+=(nokaslr); fi
-if [ "$kpti" = "0" ]; then kernel_args+=(pti=off); fi
+if [ "$kpti" = "1" ]; then kernel_args+=(pti=on); else kernel_args+=(pti=off); fi
 if [ "$mitigations" = "0" ]; then kernel_args+=(mitigations=off); fi
 if [ "${#custom_modules[@]}" -gt 0 ]; then
 	custom_modules_cmdline="$(IFS=,; echo "${custom_modules[*]}")"
@@ -300,6 +404,9 @@ fi
 if [ "${#custom_device_modes[@]}" -gt 0 ]; then
 	custom_device_modes_cmdline="$(IFS=,; echo "${custom_device_modes[*]}")"
 	kernel_args+=("ctf.chmod=$custom_device_modes_cmdline")
+fi
+if [ -n "$custom_startup" ]; then
+	kernel_args+=("ctf.startup=$custom_startup")
 fi
 if [ -n "$custom_test" ]; then
 	kernel_args+=("ctf.test=$custom_test" "ctf.test_delay=$custom_test_delay")
@@ -313,16 +420,27 @@ if [ "$smap" = "1" ]; then enabled_protections+=(SMAP); fi
 if [ "$kpti" = "1" ]; then enabled_protections+=(KPTI); fi
 if [ "$nx" = "1" ]; then enabled_protections+=(NX); fi
 if [ "$mitigations" = "1" ]; then enabled_protections+=(MITIGATIONS); fi
+if [ "$ssp" = "1" ]; then enabled_protections+=(SSP); fi
 if [ "${#enabled_protections[@]}" -eq 0 ]; then
-	echo "[+] Runtime protections: none (all selectable protections are disabled)"
+	echo "[+] Requested protections: none (all selectable protections are disabled)"
 else
-	echo "[+] Runtime protections: ${enabled_protections[*]}"
+	echo "[+] Requested protections: ${enabled_protections[*]}"
+fi
+if [ "$KERNEL_IMAGE" = "$RUNTIME_DIR/bzImage" ]; then
+	case "$artifact_ssp" in
+		1) echo '[+] Kernel SSP artifact: enabled (strong stack protector)' ;;
+		0) echo '[+] Kernel SSP artifact: disabled' ;;
+		*) echo '[!] Kernel SSP artifact: unknown (missing or invalid src/.kernel_ssp stamp)' >&2 ;;
+	esac
 fi
 if [ "${#custom_modules[@]}" -gt 0 ]; then
 	echo "[+] Custom module(s): ${custom_modules[*]}"
 fi
 if [ "${#custom_device_modes[@]}" -gt 0 ]; then
 	echo "[+] Endpoint mode(s): ${custom_device_modes[*]}"
+fi
+if [ -n "$custom_startup" ]; then
+	echo "[+] Startup script as root: $custom_startup"
 fi
 if [ -n "$custom_test" ]; then
 	echo "[+] Test as ctf: $custom_test (delay: ${custom_test_delay}s)"
@@ -345,5 +463,5 @@ fi
 	-nographic \
 	-monitor none \
 	-no-reboot \
-	-s \
+	-gdb "tcp::$QEMU_GDB_PORT" \
 	-append "$KERNEL_CMDLINE"

@@ -6,7 +6,7 @@
 
 int main(int argc, char **argv)
 {
-    const char *endpoint = argc > 1 ? argv[1] : "/dev/pwn-college-char";
+    const char *endpoint = argc > 1 ? argv[1] : "/dev/pwn-kernel-char";
     char buffer[256];
     const char probe[] = "vm-compile test\n";
     ssize_t count;
