@@ -1,1 +1,1 @@
-# gcc -static -O2 ../share/main.c
+# gcc -static -O2 ../home/main.c

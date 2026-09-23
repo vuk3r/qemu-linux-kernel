@@ -16,7 +16,7 @@ module mẫu cho pwn-kernel. Project chỉ chạy/build trên Linux hoặc WSL.
 | `data/src/` | Source C/Makefile của kernel module, khác với `src/` ở root. |
 | `data/rootfs/` | Nội dung initramfs, gồm init của guest. |
 | `data/tools/` | Tool trong guest và cấu hình `trash_gadgets`. |
-| `share/` | Thư mục project được mount vào guest tại `/home/ctf`; nó là runtime state, không được Git theo dõi. |
+| `home/` | Thư mục project được mount vào guest tại `/home/ctf`; nó là runtime state, không được Git theo dõi. |
 | `log/` | Log build, launch, và smoke test. |
 
 ## Build và chạy
@@ -190,7 +190,7 @@ QEMU_GDB_PORT=1235 ./debug.sh
 
 | Host | Guest |
 | --- | --- |
-| `share/` của project | `/home/ctf` |
+| `home/` của project | `/home/ctf` |
 | Host home | `/mnt/wsl` |
 | Host `$HOME` | `/home/ctf/host` |
 | `$HOME/pwn-kernel-share` | `/home/d4vicl` |

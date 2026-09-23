@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VMLINUX_IMAGE="${VMLINUX_IMAGE:-$SCRIPT_DIR/src/vmlinux}"
-HOST_SHARE="${HOST_SHARE:-$SCRIPT_DIR/share}"
+HOST_SHARE="${HOST_SHARE:-$SCRIPT_DIR/home}"
 QEMU_GDB_PORT="${QEMU_GDB_PORT:-1234}"
 DEBUGGER_BIN="${DEBUGGER:-pwndbg}"
 NM_BIN="${NM:-nm}"
@@ -21,7 +21,7 @@ and debug.sh when the port is not 1234.
 Environment overrides:
   QEMU_GDB_PORT       QEMU GDB port (default: 1234)
   VMLINUX_IMAGE       vmlinux with debug symbols (default: ./src/vmlinux)
-  HOST_SHARE          project share directory (default: ./share)
+  HOST_SHARE          project home directory (default: ./home)
   RUNTIME_SYMBOLS_FILE explicit guest-generated symbol marker
   DEBUGGER            debugger executable (default: pwndbg)
   NM                  nm executable (default: nm)

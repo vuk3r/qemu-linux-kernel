@@ -38,7 +38,7 @@ initramfs*.cpio*
 /data/rootfs/linuxrc
 /data/rootfs/*.ko
 /data/rootfs/usr/bin/sudo
-share/
+home/
 
 # Runtime logs and local/editor noise
 /log/

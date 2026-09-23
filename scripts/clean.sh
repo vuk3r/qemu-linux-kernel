@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DATA_DIR="$PROJECT_DIR/data"
 BUILD_DIR="${BUILD_DIR:-$DATA_DIR/build}"
-SHARE_DIR="$PROJECT_DIR/share"
+SHARE_DIR="$PROJECT_DIR/home"
 LOG_DIR="$PROJECT_DIR/log"
 mode="${1:-all}"
 
@@ -66,7 +66,7 @@ remove_staged_launch_artifacts() {
   local staging_dir="$SHARE_DIR/.launch-artifacts"
   [ -e "$staging_dir" ] || return 0
   rm -rf -- "$staging_dir"
-  echo "[+] Removed share/.launch-artifacts"
+  echo "[+] Removed home/.launch-artifacts"
 }
 
 move_root_logs
